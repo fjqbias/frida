@@ -4,3 +4,5 @@
 /releng/modules/frida-gadget-ios/*.dylib
 /releng/modules/frida-gadget-ios/node_modules
 /subprojects/*
+# frida-gum 已内联为普通目录（含 arm64 入口桩 MOVZ/MOVK 改造），不再走 submodule
+!/subprojects/frida-gum/
