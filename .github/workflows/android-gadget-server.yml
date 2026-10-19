@@ -31,8 +31,11 @@ on:
         default: 'arm64'
         type: string
   push:
+    # Frida 的版本号来自 git tag：meson.build 会调用 releng/frida_version.py，
+    # 它只接受裸 semver（如 17.0.1 或 17.0.1-xxx）。
+    # 带 "v" 前缀的 tag 会让 configure 直接失败，所以这里只匹配数字开头的 tag。
     tags:
-      - "v*"
+      - "[0-9]*"
 
 concurrency:
   group: android-gadget-server-${{ github.ref }}-${{ github.event.inputs.abis || 'all' }}
@@ -136,7 +139,9 @@ jobs:
         run: |
           set -eux
           echo "ANDROID_NDK_ROOT=${{ steps.ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
-          echo "FRIDA_VERSION=$(python3 releng/frida_version.py)" >> "$GITHUB_ENV"
+          # 版本号由 meson.build 自己调用 releng/frida_version.py 得出，
+          # 这里不再重复计算：tag 不合法时那一步会失败，反而更早暴露问题。
+          python3 releng/frida_version.py
 
       # 只打开 gadget 与 server，其余 feature 全部关掉
       # 注意：portal / frida_net / frida_node / frida_swift / frida_qml 默认就是 disabled，
