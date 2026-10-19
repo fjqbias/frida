@@ -1,0 +1,232 @@
+# 只编译 Android 四个 ABI 的 frida-gadget 与 frida-server
+#
+# 目标产物（每个 ABI 各一份，均以 xz 压缩以节省空间）：
+#   frida-server-android-<arch>.xz
+#   frida-gadget-android-<arch>.so.xz
+#
+# 不构建：iOS / macOS / Windows / Linux / QNX / 模拟器 / devkit / CLI 工具 / 各语言绑定。
+#
+# 触发方式：
+#   1) 手动运行（workflow_dispatch）：可填 abis，只编译需要的一两个，省额度；
+#      留空 = 默认 arm64 + x86_64。
+#   2) push tag（v*）：默认只编 arm64 + x86_64（覆盖绝大多数 Android 设备），
+#      并在全部构建成功后自动创建/更新对应 tag 的 GitHub Release，
+#      挂上这批 .xz 产物 + SHA256SUMS。
+#
+# 说明：
+#   - 依赖 releng 与 frida-gum / frida-core 子模块，由 tools/ensure-submodules.py 拉取；
+#   - NDK 由 nttld/setup-ndk 安装，版本与上游 CI 一致（r29）；
+#   - 32 位的 arm / x86 仍保留可选，需要时在 abis 里显式写出来；
+#   - 仓库自带的 ci.yml 会在 push tag 时触发全平台构建，如只要本流程，
+#     请把 .github/workflows/ci.yml 改名或删除（本文件不修改它）。
+
+name: Android Gadget + Server
+
+on:
+  workflow_dispatch:
+    inputs:
+      abis:
+        description: '要构建的 ABI，逗号分隔：arm64,arm,x86,x86_64（留空=默认 arm64,x86_64）'
+        required: false
+        default: 'arm64'
+        type: string
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: android-gadget-server-${{ github.ref }}-${{ github.event.inputs.abis || 'all' }}
+  cancel-in-progress: true
+
+env:
+  ANDROID_NDK_VERSION: r29
+  # 设为空串可避免矩阵空值；真正的值由 prepare 计算
+  FRIDA_PREFIX: ${{ github.workspace }}/dist
+  VALID_ABIS: "arm64 x86_64 arm x86"
+  # tag 推送与留空时的默认值：只覆盖主流的两大 64 位架构
+  DEFAULT_ABIS: "arm64,x86_64"
+
+jobs:
+  # 把输入的 abis 解析成矩阵，非法值直接失败，避免白跑
+  prepare:
+    name: 解析 ABIs
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.compute.outputs.matrix }}
+      summary: ${{ steps.compute.outputs.summary }}
+    steps:
+      - name: 计算构建矩阵
+        id: compute
+        env:
+          RAW_ABIS: ${{ github.event.inputs.abis }}
+        run: |
+          set -euo pipefail
+
+          raw="${RAW_ABIS:-}"
+          # 逗号或空格分隔都接受，统一成逗号
+          raw="$(printf '%s' "$raw" | tr ' ' ',')"
+          if [ -z "${raw//[[:space:],]/}" ]; then
+            raw="$DEFAULT_ABIS"
+          fi
+          echo "请求: $raw"
+
+          picked=()
+          IFS=',' read -ra parts <<< "$raw"
+          for p in "${parts[@]}"; do
+            p="$(printf '%s' "$p" | tr -d '[:space:]')"
+            [ -z "$p" ] && continue
+            if [[ " $VALID_ABIS " != *" $p "* ]]; then
+              echo "::error::不支持的 ABI: $p（可选: $VALID_ABIS）"
+              exit 1
+            fi
+            picked+=("$p")
+          done
+
+          if [ ${#picked[@]} -eq 0 ]; then
+            echo "::error::没有解析出任何 ABI"
+            exit 1
+          fi
+
+          # 去重并保持顺序
+          uniq=($(printf '%s\n' "${picked[@]}" | awk '!seen[$0]++'))
+
+          json="$(printf '"%s",' "${uniq[@]}")"
+          json="{\"arch\":[${json%,}]}"
+          echo "matrix=$json" >> "$GITHUB_OUTPUT"
+          echo "summary=${uniq[*]}" >> "$GITHUB_OUTPUT"
+          echo "本次构建: ${uniq[*]}"
+
+  build:
+    name: android-${{ matrix.arch }}
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: false
+
+      - name: 允许 git 访问工作区
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: 拉取 releng / frida-gum / frida-core
+        run: python3 tools/ensure-submodules.py
+
+      # frida-core 的 compiler backend 是 Go 写的；装上可避免 auto 探测失败
+      - name: 安装 Go 工具链
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: subprojects/frida-core/src/compiler/go.mod
+          cache: false
+
+      - name: 安装 Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ env.ANDROID_NDK_VERSION }}
+          add-to-path: false
+
+      - name: 导出环境变量
+        run: |
+          set -eux
+          echo "ANDROID_NDK_ROOT=${{ steps.ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+          echo "FRIDA_VERSION=$(python3 releng/frida_version.py)" >> "$GITHUB_ENV"
+
+      # 只打开 gadget 与 server，其余 feature 全部关掉
+      # 注意：portal / frida_net / frida_node / frida_swift / frida_qml 默认就是 disabled，
+      #       它们只有 --enable-*，传 --disable-* 会报未知参数
+      - name: 配置
+        run: |
+          set -eux
+          ./configure \
+            --prefix="$FRIDA_PREFIX" \
+            --host=android-${{ matrix.arch }} \
+            --enable-gadget \
+            --enable-server \
+            --disable-inject \
+            --disable-graft-tool \
+            --disable-frida-tools \
+            --disable-frida-python
+
+      - name: 编译
+        run: make -j"$(nproc)"
+
+      - name: 安装到本地前缀
+        run: make install
+
+      - name: 收集并压缩产物
+        run: |
+          set -eux
+          mkdir -p out
+          cp "$FRIDA_PREFIX/bin/frida-server" "out/frida-server-android-${{ matrix.arch }}"
+          if [[ "${{ matrix.arch }}" == *64 ]]; then
+            cp "$FRIDA_PREFIX/lib/frida-1.0/64/frida-gadget.so" "out/frida-gadget-android-${{ matrix.arch }}.so"
+          else
+            cp "$FRIDA_PREFIX/lib/frida-1.0/32/frida-gadget.so" "out/frida-gadget-android-${{ matrix.arch }}.so"
+          fi
+          file out/* || true
+
+          # 压缩以节省 Release 空间；-T0 用满所有核心
+          xz -T0 -6 out/*
+          ls -l out
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: frida-android-${{ matrix.arch }}
+          path: out/*
+          if-no-files-found: error
+
+  # 只有打 tag 时才发布；手动触发没有 tag，直接跳过
+  release:
+    name: 发布到 GitHub Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: 下载全部构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 生成校验和
+        run: |
+          set -eux
+          ls -l dist
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      # 已存在同名 release 时用 --clobber 覆盖，保证重跑幂等
+      - name: 创建或更新 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -eux
+          # 形如 v17.0.0-beta.1 的 tag 标为预发布
+          extra=()
+          case "$TAG" in
+            *-*) extra+=(--prerelease) ;;
+          esac
+
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --repo "$REPO" --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --repo "$REPO" \
+              --title "$TAG" \
+              --generate-notes \
+              "${extra[@]}"
+          fi
+
