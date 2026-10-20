@@ -157,7 +157,9 @@ jobs:
             --disable-inject \
             --disable-graft-tool \
             --disable-frida-tools \
-            --disable-frida-python
+            --disable-frida-python \
+            -- \
+            --force-fallback-for=glib
 
       - name: 编译
         run: make -j"$(nproc)"
