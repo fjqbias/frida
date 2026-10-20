@@ -22,6 +22,7 @@
 #endif
 
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #if defined (HAVE_LINUX) && defined (HAVE_SYS_AUXV_H)
 # include <sys/auxv.h>
@@ -29,6 +30,10 @@
 
 #if defined (HAVE_LINUX)
 # include "gum/gumlinux.h"
+#endif
+#ifdef HAVE_ANDROID
+# include "gum/gumandroid.h"
+# include <glib/gstdio.h>
 #endif
 
 #ifdef HAVE_WINDOWS
@@ -49,6 +54,11 @@ TESTLIST_BEGIN (process)
   TESTENTRY (process_threads_exclude_cloaked)
   TESTENTRY (process_threads_should_include_name)
   TESTENTRY (process_modules)
+#ifdef HAVE_ANDROID
+  TESTENTRY (android_linker_elf_uses_buffer)
+  TESTENTRY (android_other_elf_uses_file_mapping)
+  TESTENTRY (android_linker_elf_read_failure)
+#endif
   TESTENTRY (process_ranges)
   TESTENTRY (process_ranges_exclude_cloaked)
   TESTENTRY (thread_ranges_can_be_enumerated)
@@ -178,6 +188,11 @@ struct _TestFunctionRangeCheck
 #endif
 
 static gboolean check_thread_enumeration_testable (void);
+#ifdef HAVE_ANDROID
+static void check_elf_file_storage (GumModule * module,
+    gboolean expect_file_mapping);
+static guint64 get_mapping_inode (gconstpointer address);
+#endif
 
 static gpointer probe_thread (gpointer data);
 static void inspect_thread_ranges (void);
@@ -423,6 +438,151 @@ TESTCASE (process_modules)
   gum_process_enumerate_modules (module_found_cb, &ctx);
   g_assert_cmpuint (ctx.number_of_calls, ==, 1);
 }
+
+#ifdef HAVE_ANDROID
+
+TESTCASE (android_linker_elf_uses_buffer)
+{
+  check_elf_file_storage (gum_android_get_linker_module (), FALSE);
+}
+
+TESTCASE (android_other_elf_uses_file_mapping)
+{
+  check_elf_file_storage (gum_process_get_libc_module (), TRUE);
+}
+
+TESTCASE (android_linker_elf_read_failure)
+{
+  GError * error = NULL;
+  gchar * directory, * path;
+  GumModule * linker;
+  GumAddress base;
+  GumElfModule * elf;
+
+  directory = g_dir_make_tmp ("gum-linker-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (directory);
+  path = g_build_filename (directory, "linker64", NULL);
+
+  elf = gum_elf_module_new_from_file (path, &error);
+  g_assert_null (elf);
+  g_assert_error (error, GUM_ERROR, GUM_ERROR_INVALID_ARGUMENT);
+  g_clear_error (&error);
+
+  linker = gum_android_get_linker_module ();
+  g_assert_nonnull (linker);
+  base = gum_module_get_range (linker)->base_address;
+
+  elf = gum_elf_module_new_from_memory (path, base, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (elf);
+  g_assert_true (gum_elf_module_get_file_data (elf, NULL) ==
+      GSIZE_TO_POINTER (base));
+  g_object_unref (elf);
+
+  g_assert_cmpint (g_rmdir (directory), ==, 0);
+  g_free (path);
+  g_free (directory);
+}
+
+static void
+check_elf_file_storage (GumModule * module,
+                        gboolean expect_file_mapping)
+{
+  const gchar * path;
+  GumAddress base;
+  gchar * expected;
+  gsize expected_size;
+  GError * error = NULL;
+  guint i;
+
+  g_assert_nonnull (module);
+  path = gum_module_get_path (module);
+  base = gum_module_get_range (module)->base_address;
+
+  if (!g_file_get_contents (path, &expected, &expected_size, &error))
+  {
+    g_test_skip (error->message);
+    g_clear_error (&error);
+    return;
+  }
+
+  for (i = 0; i != 2; i++)
+  {
+    GumElfModule * elf;
+    gconstpointer actual;
+    gsize actual_size;
+    guint64 inode;
+
+    elf = (i == 0)
+        ? gum_elf_module_new_from_file (path, &error)
+        : gum_elf_module_new_from_memory (path, base, &error);
+    g_assert_no_error (error);
+    g_assert_nonnull (elf);
+
+    actual = gum_elf_module_get_file_data (elf, &actual_size);
+    g_assert_cmpuint (actual_size, ==, expected_size);
+    g_assert_cmpmem (actual, actual_size, expected, expected_size);
+
+    inode = get_mapping_inode (actual);
+    if (expect_file_mapping)
+      g_assert_cmpuint (inode, !=, 0);
+    else
+      g_assert_cmpuint (inode, ==, 0);
+
+    if (i != 0)
+      g_assert_cmphex (gum_elf_module_get_base_address (elf), ==, base);
+
+    g_object_unref (elf);
+  }
+
+  g_free (expected);
+}
+
+static guint64
+get_mapping_inode (gconstpointer address)
+{
+  GumAddress needle = GUM_ADDRESS (address);
+  gchar * maps, ** lines;
+  GError * error = NULL;
+  guint64 result = 0;
+  gboolean found = FALSE;
+  guint i;
+
+#ifdef HAVE_ARM64
+  needle &= G_GUINT64_CONSTANT (0x00ffffffffffffff);
+#endif
+
+  g_file_get_contents ("/proc/self/maps", &maps, NULL, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (maps);
+
+  lines = g_strsplit (maps, "\n", -1);
+  for (i = 0; lines[i] != NULL; i++)
+  {
+    guint64 start, end, inode;
+
+    if (sscanf (lines[i],
+        "%" G_GINT64_MODIFIER "x-%" G_GINT64_MODIFIER "x %*s %*s %*s %"
+        G_GUINT64_FORMAT, &start, &end, &inode) != 3)
+      continue;
+
+    if (needle >= start && needle < end)
+    {
+      result = inode;
+      found = TRUE;
+      break;
+    }
+  }
+  g_strfreev (lines);
+  g_free (maps);
+
+  g_assert_true (found);
+
+  return result;
+}
+
+#endif
 
 #if defined (HAVE_LINUX) && !defined (HAVE_ANDROID)
 

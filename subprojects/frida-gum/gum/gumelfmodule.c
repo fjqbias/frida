@@ -264,6 +264,9 @@ static GBytes * gum_decompress_xz (gconstpointer data, gsize size);
 
 static gboolean gum_maybe_extract_from_apk (const gchar * path,
     GBytes ** file_bytes);
+#ifdef HAVE_ANDROID
+static gboolean gum_elf_module_is_android_linker_path (const gchar * path);
+#endif
 
 G_DEFINE_TYPE (GumElfModule, gum_elf_module, G_TYPE_OBJECT)
 
@@ -559,28 +562,50 @@ gum_elf_module_load (GumElfModule * self,
 #endif
     if (!gum_maybe_extract_from_apk (self->source_path, &self->file_bytes))
     {
-      GMappedFile * file;
-      gconstpointer data;
-      gsize size;
-      GumMemoryRange r;
-
-      file = g_mapped_file_new (self->source_path, FALSE, &local_error);
-      if (file != NULL)
+#ifdef HAVE_ANDROID
+      if (gum_elf_module_is_android_linker_path (self->source_path))
       {
-        self->file_bytes = g_mapped_file_get_bytes (file);
-        g_mapped_file_unref (file);
+        gchar * contents;
+        gsize size;
 
-        data = g_bytes_get_data (self->file_bytes, &size);
-        r.base_address = GUM_ADDRESS (data);
-        r.size = GUM_ALIGN_SIZE (size, gum_query_page_size ());
-        gum_cloak_add_range (&r);
-        self->file_mapped_range = r;
+        /*
+         * Avoid a second file mapping that /proc/self/maps consumers may
+         * mistake for the linker's loaded image. Keep the complete file data.
+         */
+        if (g_file_get_contents (self->source_path, &contents, &size,
+            &local_error))
+        {
+          self->file_bytes = g_bytes_new_take (contents, size);
+        }
       }
       else
+#endif
+      {
+        GMappedFile * file;
+        gconstpointer data;
+        gsize size;
+        GumMemoryRange r;
+
+        file = g_mapped_file_new (self->source_path, FALSE, &local_error);
+        if (file != NULL)
+        {
+          self->file_bytes = g_mapped_file_get_bytes (file);
+          g_mapped_file_unref (file);
+
+          data = g_bytes_get_data (self->file_bytes, &size);
+          r.base_address = GUM_ADDRESS (data);
+          r.size = GUM_ALIGN_SIZE (size, gum_query_page_size ());
+          gum_cloak_add_range (&r);
+          self->file_mapped_range = r;
+        }
+      }
+
+      if (self->file_bytes == NULL)
       {
         if (self->source_mode == GUM_ELF_SOURCE_MODE_OFFLINE)
           goto unable_to_open;
 
+        g_clear_error (&local_error);
         self->file_bytes = g_bytes_new_static (
             GSIZE_TO_POINTER (self->base_address),
             G_MAXSIZE - self->base_address);
@@ -2765,6 +2790,21 @@ beach:
   return FALSE;
 #endif
 }
+
+#ifdef HAVE_ANDROID
+
+static gboolean
+gum_elf_module_is_android_linker_path (const gchar * path)
+{
+  const gchar * name;
+
+  name = strrchr (path, '/');
+  name = (name != NULL) ? name + 1 : path;
+
+  return strcmp (name, "linker") == 0 || strcmp (name, "linker64") == 0;
+}
+
+#endif
 
 GumElfSectionDetails *
 gum_elf_section_details_ref (GumElfSectionDetails * details)
