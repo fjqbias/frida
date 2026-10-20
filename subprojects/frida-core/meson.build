@@ -462,8 +462,9 @@ if not lzfse_dep.found()
   lzfse_dep = dependency('lzfse', required: get_option('barebone_backend'), default_options: ['default_library=static'])
 endif
 
-native_glib_dep = dependency('glib-2.0', version: glib_version_req, native: true, default_options: glib_options)
-native_gio_dep = dependency('gio-2.0', native: true)
+native_glib_dep = dependency('glib-2.0', version: glib_version_req, native: true,
+  allow_fallback: false, default_options: glib_options)
+native_gio_dep = dependency('gio-2.0', native: true, allow_fallback: false)
 native_gee_dep = dependency('gee-0.8', native: true, default_options: gee_options)
 native_brotlienc_dep = dependency('libbrotlienc', native: true, default_options: ['default_library=static'])
 

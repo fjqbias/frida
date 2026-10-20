@@ -407,12 +407,13 @@ frida_glib_probe = '''
 void * _frida_detect_glib_fork (void) { return (void *) g_thread_set_callbacks; }
 '''
 
-glib_dep_native = dependency('glib-2.0', version: glib_version_req, native: true, default_options: glib_options)
+glib_dep_native = dependency('glib-2.0', version: glib_version_req, native: true,
+  allow_fallback: false, default_options: glib_options)
 native_cc = meson.get_compiler('c', native: true)
 if glib_dep_native.type_name() == 'internal' or native_cc.compiles(frida_glib_probe, dependencies: [glib_dep_native], name: 'Frida GLib fork (native)')
   add_project_arguments('-DHAVE_FRIDA_GLIB=1', language: languages, native: true)
 endif
-gio_dep_native = dependency('gio-2.0', native: true)
+gio_dep_native = dependency('gio-2.0', native: true, allow_fallback: false)
 
 capstone_options = [
   'default_library=static',
