@@ -1,4 +1,4 @@
-﻿#include "frida-gadget.h"
+#include "frida-gadget.h"
 
 #include "frida-base.h"
 #include "frida-payload.h"
