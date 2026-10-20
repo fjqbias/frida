@@ -159,7 +159,11 @@ jobs:
             --disable-frida-tools \
             --disable-frida-python \
             -- \
-            --force-fallback-for=glib
+            --force-fallback-for=glib \
+            -Dglib:sysprof=disabled \
+            -Dglib:tests=false \
+            -Dglib:introspection=disabled \
+            -Dglib:man-pages=disabled
 
       - name: 编译
         run: make -j"$(nproc)"

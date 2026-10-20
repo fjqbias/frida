@@ -1,4 +1,4 @@
-project('glib', 'c',
+﻿project('glib', 'c',
   version : '2.90.0',
   # NOTE: See the policy in docs/meson-version.md before changing the Meson dependency
   meson_version : '>= 1.4.0',
@@ -2939,20 +2939,20 @@ summary({
   'C++ Compiler' : have_cxx ? cxx.get_id() : 'none',
   'shared build' : glib_build_shared,
   'static build' : glib_build_static,
-}, section: 'Build environment')
+}, section: 'GLib build environment')
 
 if build_machine.system() != host_system
   summary({
     'build cpu' : build_machine.cpu_family(),
     'build endian' : build_machine.endian(),
     'build system' : build_machine.system(),
-  }, section: 'Build environment')
+  }, section: 'GLib build environment')
 endif
 
 if linux_libc != ''
   summary({
     'linux_libc' : linux_libc
-  }, section: 'Build environment')
+  }, section: 'GLib build environment')
 endif
 
 summary({
