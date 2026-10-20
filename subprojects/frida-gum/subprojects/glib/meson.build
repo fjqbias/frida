@@ -2930,6 +2930,7 @@ rst2html5 = find_program('rst2html5', 'rst2html5.py', required: get_option('docu
 
 gnome = import('gnome')
 subdir('docs/reference')
+if not is_subproject
 
 summary({
   'host cpu' : host_machine.cpu_family(),
@@ -3007,3 +3008,4 @@ summary({
   'introspection' : enable_gir,
   'file_monitor_backend' : get_option('file_monitor_backend'),
 }, section: 'Options')
+endif
